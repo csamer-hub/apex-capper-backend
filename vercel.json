@@ -16,22 +16,3 @@
     }
   ]
 }
-```
-4. Click **"Commit changes"**
-
-**Then — README.md:**
-1. Click **"Add file" → "Create new file"**
-2. Filename: `README.md`
-3. Paste:
-```
-# APEX CAPPER Backend
-Odds API proxy for APEX CAPPER. Keeps API keys secure server-side.
-```
-4. Click **"Commit changes"**
-
-Your root should then show:
-```
-api/
-package.json
-vercel.json
-README.md
