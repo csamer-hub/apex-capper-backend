@@ -1,10 +1,9 @@
 {
   "name": "apex-capper-backend",
   "version": "1.0.0",
-  "description": "APEX CAPPER backend — Odds API proxy for secure key management",
   "private": true,
   "scripts": {
-    "dev": "vercel dev"
+    "build": "echo 'No build needed'"
   },
   "engines": {
     "node": "18.x"
