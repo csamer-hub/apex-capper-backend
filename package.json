@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "echo 'No build needed'"
+    "build": "echo done"
   },
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
