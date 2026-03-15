@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "functions": {
+    "api/*.js": {
+      "runtime": "nodejs18.x"
+    }
+  },
+  "headers": [
+    {
+      "source": "/api/(.*)",
+      "headers": [
+        { "key": "Access-Control-Allow-Origin", "value": "*" },
+        { "key": "Access-Control-Allow-Methods", "value": "GET, OPTIONS" },
+        { "key": "Access-Control-Allow-Headers", "value": "Content-Type" }
+      ]
+    }
+  ]
+}
+```
+4. Click **"Commit changes"**
+
+**Then — README.md:**
+1. Click **"Add file" → "Create new file"**
+2. Filename: `README.md`
+3. Paste:
+```
+# APEX CAPPER Backend
+Odds API proxy for APEX CAPPER. Keeps API keys secure server-side.
+```
+4. Click **"Commit changes"**
+
+Your root should then show:
+```
+api/
+package.json
+vercel.json
+README.md
