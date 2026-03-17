@@ -1,6 +1,6 @@
-// api/ncaab.js — NCAA Men's Basketball via ESPN public API (no key required)
-// Covers: scoreboard, standings, rankings, teams, player stats, search, news
-// Also supports women's college basketball via gender=womens param
+// api/ncaab.js — NCAA Basketball + College Football via ESPN public API (no key required)
+// sport=basketball (default) or sport=football
+// gender=mens (default) or gender=womens (basketball only)
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -8,11 +8,14 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const { type, player, team, date, limit = "10", gender = "mens" } = req.query;
+  const { type, player, team, date, limit = "10", gender = "mens", sport = "basketball" } = req.query;
 
-  const LEAGUE = `${gender}-college-basketball`;
-  const SITE  = `https://site.api.espn.com/apis/site/v2/sports/basketball/${LEAGUE}`;
-  const CORE  = `https://sports.core.api.espn.com/v2/sports/basketball/leagues/${LEAGUE}`;
+  // Support college football too
+  const SPORT = sport === "football" ? "football" : "basketball";
+  const LEAGUE = sport === "football" ? "college-football"
+    : `${gender}-college-basketball`;
+  const SITE  = `https://site.api.espn.com/apis/site/v2/sports/${SPORT}/${LEAGUE}`;
+  const CORE  = `https://sports.core.api.espn.com/v2/sports/${SPORT}/leagues/${LEAGUE}`;
   const SEARCH = "https://site.web.api.espn.com/apis/search/v2";
 
   try {
