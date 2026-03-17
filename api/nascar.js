@@ -22,10 +22,24 @@ export default async function handler(req, res) {
 
   try {
 
+    // ── RAW debug — see exactly what CDN returns
+    if (type === "raw") {
+      const path = req.query.path || `${year}/${series}/schedule-feed.json`;
+      const url = `${CDN}/${path}`;
+      const r = await fetch(url);
+      const text = await r.text();
+      return res.status(200).json({ status: r.status, url, preview: text.slice(0, 2000) });
+    }
+
     // ── SCHEDULE ─────────────────────────────────────────────────────────────
     if (type === "schedule") {
       const data = await cdn(`${year}/${series}/schedule-feed.json`);
-      const races = (data?.response?.schedule || data || []);
+      // Handle multiple possible response shapes
+      const races = Array.isArray(data) ? data
+        : Array.isArray(data?.response?.schedule) ? data.response.schedule
+        : Array.isArray(data?.schedule) ? data.schedule
+        : Array.isArray(data?.response) ? data.response
+        : [];
       return res.status(200).json({
         type: "schedule", year, series,
         races: races.map(r => ({
@@ -49,7 +63,11 @@ export default async function handler(req, res) {
     // ── NEXT RACE ─────────────────────────────────────────────────────────────
     if (type === "next") {
       const data = await cdn(`${year}/${series}/schedule-feed.json`);
-      const races = (data?.response?.schedule || data || []);
+      const races = Array.isArray(data) ? data
+        : Array.isArray(data?.response?.schedule) ? data.response.schedule
+        : Array.isArray(data?.schedule) ? data.schedule
+        : Array.isArray(data?.response) ? data.response
+        : [];
       const now = new Date();
 
       const upcoming = races
@@ -153,7 +171,11 @@ export default async function handler(req, res) {
     // ── RECENT RESULTS ────────────────────────────────────────────────────────
     if (type === "recent") {
       const data = await cdn(`${year}/${series}/schedule-feed.json`);
-      const races = data?.response?.schedule || data || [];
+      const races = Array.isArray(data) ? data
+        : Array.isArray(data?.response?.schedule) ? data.response.schedule
+        : Array.isArray(data?.schedule) ? data.schedule
+        : Array.isArray(data?.response) ? data.response
+        : [];
       const now = new Date();
 
       const completed = races
