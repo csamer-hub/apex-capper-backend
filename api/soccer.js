@@ -54,21 +54,21 @@ export default async function handler(req, res) {
     return LEAGUE_SLUGS[key] || input; // pass through if already a slug
   }
 
+  // ── LIST supported leagues — handle BEFORE slug resolution ─────────────────
+  if (type === "leagues") {
+    return res.status(200).json({
+      type: "leagues",
+      supported: Object.entries(LEAGUE_SLUGS)
+        .filter(([, v]) => v)
+        .map(([name, slug]) => ({ name, slug }))
+    });
+  }
+
   const leagueSlug = resolveLeague(league);
   const SITE = `https://site.api.espn.com/apis/site/v2/sports/soccer/${leagueSlug}`;
   const CORE = `https://sports.core.api.espn.com/v2/sports/soccer/leagues/${leagueSlug}`;
 
   try {
-
-    // ── LIST supported leagues ───────────────────────────────────────────────
-    if (type === "leagues") {
-      return res.status(200).json({
-        type: "leagues",
-        supported: Object.entries(LEAGUE_SLUGS)
-          .filter(([, v]) => v)
-          .map(([name, slug]) => ({ name, slug }))
-      });
-    }
 
     // ── SCOREBOARD / fixtures ────────────────────────────────────────────────
     if (type === "scoreboard" || type === "schedule") {
