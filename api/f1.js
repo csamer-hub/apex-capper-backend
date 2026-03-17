@@ -17,10 +17,15 @@ export default async function handler(req, res) {
 
     // ── MEETINGS — race calendar for a season ────────────────────────────────
     if (type === "meetings" || type === "calendar") {
-      const url = `${BASE}/meetings?year=${year}`;
+      // OpenF1 has data from 2023 onwards
+      const safeYear = Math.max(2023, parseInt(year));
+      const url = `${BASE}/meetings?year=${safeYear}`;
       const r = await fetch(url);
       if (!r.ok) throw new Error(`OpenF1 meetings returned ${r.status}`);
       const data = await r.json();
+      if (!Array.isArray(data) || !data.length) {
+        return res.status(200).json({ type: "meetings", year: safeYear, races: [], message: `No data available for ${safeYear}. OpenF1 covers 2023+.` });
+      }
 
       return res.status(200).json({
         type: "meetings",
@@ -365,35 +370,58 @@ export default async function handler(req, res) {
 
     // ── NEXT RACE info ───────────────────────────────────────────────────────
     if (type === "next") {
-      const url = `${BASE}/meetings?year=${year}`;
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`OpenF1 meetings returned ${r.status}`);
-      const data = await r.json();
+      // Try current year first, fall back to previous year if empty
       const now = new Date();
-      const upcoming = data
-        .filter(m => new Date(m.date_start) > now)
-        .sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
-      const next = upcoming[0];
-      if (!next) return res.status(200).json({ type: "next", data: null });
+      let next = null;
+      let sessions = [];
+
+      for (const tryYear of [year, String(parseInt(year) - 1)]) {
+        const url = `${BASE}/meetings?year=${tryYear}`;
+        const r = await fetch(url);
+        if (!r.ok) continue;
+        const data = await r.json();
+        if (!Array.isArray(data) || !data.length) continue;
+
+        // Try to find upcoming race
+        const upcoming = data
+          .filter(m => m.date_start && new Date(m.date_start) > now)
+          .sort((a, b) => new Date(a.date_start) - new Date(b.date_start));
+
+        if (upcoming.length > 0) {
+          next = upcoming[0];
+        } else {
+          // No upcoming — return most recent past race
+          next = data.sort((a, b) => new Date(b.date_start) - new Date(a.date_start))[0];
+        }
+        if (next) break;
+      }
+
+      if (!next) return res.status(200).json({ type: "next", data: null, message: "No race data available" });
 
       // Get sessions for this meeting
-      const sessUrl = `${BASE}/sessions?meeting_key=${next.meeting_key}`;
-      const sr = await fetch(sessUrl);
-      const sessions = await sr.json();
+      try {
+        const sessUrl = `${BASE}/sessions?meeting_key=${next.meeting_key}`;
+        const sr = await fetch(sessUrl);
+        sessions = sr.ok ? await sr.json() : [];
+      } catch {}
 
       return res.status(200).json({
         type: "next",
+        isUpcoming: new Date(next.date_start) > now,
         race: {
           meetingKey: next.meeting_key,
           name: next.meeting_name,
+          officialName: next.meeting_official_name,
           country: next.country_name,
           circuit: next.circuit_short_name,
           location: next.location,
           dateStart: next.date_start,
+          year: next.year,
         },
         sessions: sessions.map(s => ({
           sessionName: s.session_name,
           sessionType: s.session_type,
+          sessionKey: s.session_key,
           dateStart: s.date_start,
         }))
       });
