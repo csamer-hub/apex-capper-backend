@@ -17,6 +17,15 @@ export default async function handler(req, res) {
 
   try {
 
+    // ── RAW debug ────────────────────────────────────────────────────────────
+    if (type === "raw") {
+      const path = req.query.path || `apis/site/v2/sports/basketball/${LEAGUE}/scoreboard`;
+      const url = path.startsWith("http") ? path : `https://site.api.espn.com/${path}`;
+      const r = await fetch(url);
+      const text = await r.text();
+      return res.status(200).json({ status: r.status, url, preview: text.slice(0, 2000) });
+    }
+
     // ── SCOREBOARD ───────────────────────────────────────────────────────────
     if (type === "scoreboard") {
       let url = `${SITE}/scoreboard`;
