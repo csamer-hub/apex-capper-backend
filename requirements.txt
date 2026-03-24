@@ -1,5 +1,1 @@
-pybaseball
-pandas>=1.5.0
 requests>=2.28.0
-lxml>=4.9.0
-numpy>=1.23.0
