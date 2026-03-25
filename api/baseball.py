@@ -490,13 +490,23 @@ def handle_bullpen(params):
 
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
-
+def handle_full(params):
+    season_status, season_body = handle_season(params)
+    recent_status, recent_body = handle_recent(params)
+    season_data = json.loads(season_body)
+    recent_data = json.loads(recent_body)
+    return ok({
+        'name':   season_data.get('name') or recent_data.get('name'),
+        'season': season_data,
+        'recent': recent_data if recent_status == 200 else None,
+    })
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
         qtype  = params.get('type', [''])[0]
         try:
             if   qtype == 'debug':   status, body = handle_debug(params)
+            elif qtype == 'full':    status, body = handle_full(params)
             elif qtype == 'season':  status, body = handle_season(params)
             elif qtype == 'recent':  status, body = handle_recent(params)
             elif qtype == 'bullpen': status, body = handle_bullpen(params)
