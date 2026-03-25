@@ -237,25 +237,30 @@ def handle_season(params):
 
     # ── 3. xERA / expected stats ───────────────────────────────────────────
     # Expected stats CSV column layout from debug:
-    # [last_name, first_name, player_id, year, pa, bip, ba, est_ba, ...]
-    # Values: last_name="Webb, Logan", first_name=657277(ID), player_id=2025(YEAR!), year=856(PA)...
-    # Shift: each value is one column to the right of its actual meaning
-    # real player_id = first_name col, real year = player_id col, real pa = year col, etc.
-    # real era = ? , real xera = ?
-    # Columns: last_name, first_name, player_id, year, pa, bip, ba, est_ba, est_ba_minus_ba_diff,
-    #          slg, est_slg, est_slg_minus_slg_diff, woba, est_woba, est_woba_minus_woba_diff, era, xera, era_minus_xera_diff
-    # Shifted cols: era is in 'era' col, xera is in 'xera' col — these are far enough right to be correct
+    # Due to Savant BOM/quote shift, every value sits one column to the right.
+    # Confirmed mapping from debug output (Webb 2025 as reference):
+    #   CSV col 'era'                    -> real value is xERA
+    #   CSV col 'xera'                   -> real value is ERA-minus-xERA gap (ERA - xERA)
+    #   CSV col 'est_woba_minus_woba_diff'-> real value is ERA
+    #   CSV col 'woba'                   -> real value is xWOBA
+    #   CSV col 'ba'                     -> real value is xBA
+    #   CSV col 'slg'                    -> real value is xSLG
+    # So: real ERA  = est_woba_minus_woba_diff col
+    #     real xERA = era col
+    #     real gap  = xera col (= ERA - xERA, negative = ERA better than xERA)
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true")
         row  = find_player(rows, last, first)
         if row:
-            era  = sf(row.get('era'))
-            xera = sf(row.get('xera'))
+            xera = sf(row.get('era'))                        # xERA is in 'era' col
+            gap  = sf(row.get('xera'))                       # ERA-xERA gap is in 'xera' col
+            era  = round(xera + gap, 2) if (xera and gap is not None) else None
             result.update({
                 'era':   era,
                 'xera':  xera,
-                'xwoba': sf(row.get('est_woba')),
-                'xba':   sf(row.get('est_ba')),
+                'xwoba': sf(row.get('woba')),                # xWOBA is in 'woba' col
+                'xba':   sf(row.get('ba')),                  # xBA is in 'ba' col
+                'xslg':  sf(row.get('slg')),                 # xSLG is in 'slg' col
             })
             if era is not None and xera is not None:
                 gap = round(xera - era, 2)
