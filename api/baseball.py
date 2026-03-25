@@ -342,13 +342,40 @@ def handle_bullpen(params):
 
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
+def handle_debug(params):
+    season = int(params.get('season', [2025])[0])
+    result = {}
+    endpoints = {
+        'arsenal_speed': f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true",
+        'expected':      f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true",
+        'percentile':    f"{SAVANT}/leaderboard/percentile-rankings?type=pitcher&year={season}&position=&team=&csv=true",
+    }
+    for name, url in endpoints.items():
+        try:
+            rows = fetch_csv(url)
+            if rows:
+                result[name] = {
+                    'total_rows': len(rows),
+                    'columns': list(rows[0].keys()),
+                    'first_player': {k: rows[0][k] for k in list(rows[0].keys())[:10]},
+                }
+            else:
+                result[name] = {'error': 'empty response'}
+        except Exception as e:
+            result[name] = {'error': str(e)}
+    return ok(result)
+```
 
+Commit changes. Wait for Vercel to deploy (~15 seconds). Then open this URL in your browser:
+```
+https://apex-capper-backend.vercel.app/api/baseball?type=debug&season=2025
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
         qtype  = params.get('type', [''])[0]
         try:
-            if   qtype == 'season':  status, body = handle_season(params)
+            if   qtype == 'debug':   status, body = handle_debug(params)
+            elif qtype == 'season':  status, body = handle_season(params)
             elif qtype == 'recent':  status, body = handle_recent(params)
             elif qtype == 'bullpen': status, body = handle_bullpen(params)
             else: status, body = err(
