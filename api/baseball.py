@@ -1,7 +1,6 @@
 # api/baseball.py
 # Apex Capper — Baseball Savant data endpoint
-# Zero heavy dependencies — uses only stdlib + requests
-# Hits Baseball Savant CSV endpoints directly (same data pybaseball uses)
+# Zero heavy dependencies — stdlib + requests only
 #
 # Routes:
 #   /api/baseball?type=season&name=verlander_justin&season=2026
@@ -37,14 +36,43 @@ def fetch_csv(url):
     if not text or text.startswith('<'): return []
     return list(csv.DictReader(io.StringIO(text)))
 
-def find_player(rows, name_keys, search):
-    s = search.lower().strip()
-    parts = s.split()
+def find_player(rows, last, first):
+    """
+    Search Savant CSV rows for a player.
+    Handles ALL known Savant name column formats:
+      - separate 'last_name' + 'first_name' columns  (arsenal CSVs)
+      - 'player_name' as 'Last, First'               (expected stats, percentile)
+      - 'player_name' as 'First Last'                (statcast search)
+    """
+    last_l  = last.lower().strip()
+    first_l = first.lower().strip()
+    full1   = f"{last_l}, {first_l}"   # "verlander, justin"
+    full2   = f"{first_l} {last_l}"    # "justin verlander"
+
     for row in rows:
-        for key in name_keys:
-            cell = str(row.get(key, '')).lower()
-            if s in cell or all(p in cell for p in parts):
-                return row
+        # Format 1: separate last_name / first_name columns (arsenal, exitvelo)
+        row_last  = str(row.get('last_name',  '')).lower().strip()
+        row_first = str(row.get('first_name', '')).lower().strip()
+        if row_last == last_l and row_first == first_l:
+            return row
+        # partial last name match + first name starts with
+        if last_l in row_last and first_l[:3] in row_first:
+            return row
+
+        # Format 2: player_name = "Last, First" (expected stats, percentile)
+        pname = str(row.get('player_name', '')).lower().strip()
+        if full1 in pname or pname in full1:
+            return row
+
+        # Format 3: player_name = "First Last" (statcast search CSV)
+        if full2 in pname or pname in full2:
+            return row
+
+        # Format 4: any column containing both last and first name
+        row_str = ' '.join(str(v) for v in row.values()).lower()
+        if last_l in row_str and first_l in row_str:
+            return row
+
     return None
 
 def ok(data):  return 200, json.dumps(data, default=str)
@@ -55,6 +83,7 @@ def yr(): return datetime.now().year
 # ── player ID lookup ──────────────────────────────────────────────────────────
 
 def lookup_id(last, first):
+    """Resolve MLBAM ID via Baseball Savant player search."""
     try:
         r = requests.get(
             f"{SAVANT}/player/search-all?search={first}+{last}",
@@ -63,10 +92,41 @@ def lookup_id(last, first):
         data = r.json()
         if not data: return None
         for p in data:
-            if str(p.get('pos','')).upper() in ('P','SP','RP'):
+            if str(p.get('pos', '')).upper() in ('P', 'SP', 'RP'):
                 return int(p['id'])
         return int(data[0]['id'])
     except Exception: return None
+
+
+# ── DEBUG — dumps raw columns from each Savant endpoint ──────────────────────
+
+def handle_debug(params):
+    """
+    Temporary diagnostic endpoint.
+    Shows real column names + first player row from each Savant CSV.
+    Use: /api/baseball?type=debug&season=2025
+    """
+    season = int(params.get('season', [yr()])[0])
+    result = {}
+    endpoints = {
+        'arsenal_speed': f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true",
+        'expected':      f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true",
+        'percentile':    f"{SAVANT}/leaderboard/percentile-rankings?type=pitcher&year={season}&position=&team=&csv=true",
+    }
+    for name, url in endpoints.items():
+        try:
+            rows = fetch_csv(url)
+            if rows:
+                result[name] = {
+                    'total_rows':   len(rows),
+                    'columns':      list(rows[0].keys()),
+                    'first_player': dict(list(rows[0].items())[:12]),
+                }
+            else:
+                result[name] = {'error': 'empty response'}
+        except Exception as e:
+            result[name] = {'error': str(e)}
+    return ok(result)
 
 
 # ── SEASON sabermetrics ───────────────────────────────────────────────────────
@@ -81,14 +141,12 @@ def handle_season(params):
     last    = parts[0] if len(parts) > 0 else ''
     first   = parts[1] if len(parts) > 1 else ''
     display = f"{first.title()} {last.title()}"
-    nkeys   = ['player_name', 'last_name, first_name', 'name']
-    lf      = f"{last}, {first}"
     result  = {'name': display, 'season': season, 'sources': []}
 
-    # velocity per pitch type
+    # 1 — velocity per pitch type
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true")
-        row  = find_player(rows, nkeys, display) or find_player(rows, nkeys, lf)
+        row  = find_player(rows, last, first)
         if row:
             velo = {}
             for pt in ['ff','si','sl','ch','cu','fc','fs','kc','st']:
@@ -98,10 +156,10 @@ def handle_season(params):
             result['sources'].append('savant_arsenal_speed')
     except Exception as e: result['velo_error'] = str(e)
 
-    # spin rate per pitch type
+    # 2 — spin rate per pitch type
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_spin&hand=&csv=true")
-        row  = find_player(rows, nkeys, display) or find_player(rows, nkeys, lf)
+        row  = find_player(rows, last, first)
         if row:
             spin = {}
             for pt in ['ff','si','sl','ch','cu','fc']:
@@ -111,15 +169,16 @@ def handle_season(params):
             result['sources'].append('savant_arsenal_spin')
     except Exception as e: result['spin_error'] = str(e)
 
-    # xERA / expected stats
+    # 3 — xERA / expected stats
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true")
-        row  = find_player(rows, nkeys, display) or find_player(rows, nkeys, lf)
+        row  = find_player(rows, last, first)
         if row:
             era  = sf(row.get('era'))
             xera = sf(row.get('xera'))
             result.update({
-                'era': era, 'xera': xera,
+                'era':   era,
+                'xera':  xera,
                 'xwoba': sf(row.get('xwoba')),
                 'xba':   sf(row.get('xba')),
                 'pa':    sf(row.get('pa'), 0),
@@ -127,20 +186,20 @@ def handle_season(params):
             if era is not None and xera is not None:
                 gap = round(xera - era, 2)
                 result['era_xera_gap'] = gap
-                if   gap >=  1.5: sig, note = 'HIGH_REGRESSION_RISK',    f'xERA {gap} above ERA — pitcher has been lucky, expect more runs allowed.'
-                elif gap >=  0.75: sig, note = 'MODERATE_REGRESSION_RISK', f'xERA {gap} above ERA — mild regression risk.'
-                elif gap <= -1.5: sig, note = 'IMPROVEMENT_LIKELY',       f'ERA {abs(gap)} above xERA — pitcher unlucky, expect fewer runs allowed.'
-                elif gap <= -0.75: sig, note = 'MILD_IMPROVEMENT',         f'ERA {abs(gap)} above xERA — mild improvement likely.'
-                else:              sig, note = 'NEUTRAL',                  'ERA and xERA aligned — no regression signal.'
+                if   gap >=  1.5:  sig, note = 'HIGH_REGRESSION_RISK',      f'xERA {gap} above ERA — pitcher has been lucky, expect more runs.'
+                elif gap >=  0.75: sig, note = 'MODERATE_REGRESSION_RISK',  f'xERA {gap} above ERA — mild regression risk.'
+                elif gap <= -1.5:  sig, note = 'IMPROVEMENT_LIKELY',        f'ERA {abs(gap)} above xERA — pitcher unlucky, expect fewer runs.'
+                elif gap <= -0.75: sig, note = 'MILD_IMPROVEMENT',          f'ERA {abs(gap)} above xERA — mild improvement likely.'
+                else:              sig, note = 'NEUTRAL',                   'ERA and xERA aligned — no regression signal.'
                 result['regression_signal'] = sig
                 result['regression_note']   = note
             result['sources'].append('savant_expected')
     except Exception as e: result['expected_error'] = str(e)
 
-    # percentile ranks
+    # 4 — percentile ranks
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/percentile-rankings?type=pitcher&year={season}&position=&team=&csv=true")
-        row  = find_player(rows, nkeys, display) or find_player(rows, nkeys, lf)
+        row  = find_player(rows, last, first)
         if row:
             result['percentile_ranks'] = {
                 'xera':     sf(row.get('xera'),             0),
@@ -155,7 +214,11 @@ def handle_season(params):
     except Exception as e: result['percentile_error'] = str(e)
 
     if not result['sources']:
-        result['warning'] = f'No data found for "{display}" in {season}. Check spelling — format: verlander_justin'
+        result['warning'] = (
+            f'No data found for "{display}" in {season}. '
+            'Try the debug endpoint to see raw column names: '
+            '?type=debug&season=2025'
+        )
     return ok(result)
 
 
@@ -176,7 +239,8 @@ def handle_recent(params):
     if not mlbam:
         return err(
             f'Could not resolve player ID for "{display}". '
-            'Pass player_id directly — find it at baseballsavant.mlb.com', 404
+            'Pass player_id directly — find MLBAM ID at baseballsavant.mlb.com',
+            404
         )
 
     url = (
@@ -190,54 +254,51 @@ def handle_recent(params):
     try:    rows = fetch_csv(url)
     except Exception as e: return err(f'Statcast fetch failed: {e}', 500)
     if not rows:
-        return err(f'No pitch data for {display} (ID: {mlbam}) in last 75 days.', 404)
+        return err(f'No pitch data for {display} (ID:{mlbam}) in last 75 days.', 404)
 
-    # group by game date
     games = {}
     for row in rows:
-        gd = row.get('game_date','')
+        gd = row.get('game_date', '')
         if gd: games.setdefault(gd, []).append(row)
 
     starts = []
     for gdate in sorted(games):
         gr = games[gdate]
-        if len(gr) < 40: continue   # skip relief appearances
+        if len(gr) < 40: continue
 
         ff_v, si_v, all_v, spins, ks, bbs, pa = [], [], [], [], 0, 0, 0
         for row in gr:
-            pt = row.get('pitch_type','')
+            pt = row.get('pitch_type', '')
             v  = sf(row.get('release_speed'), 1)
             if v:
                 all_v.append(v)
-                if pt in ('FF','FA'): ff_v.append(v)
-                elif pt == 'SI':      si_v.append(v)
+                if pt in ('FF', 'FA'): ff_v.append(v)
+                elif pt == 'SI':       si_v.append(v)
             sp = sf(row.get('release_spin_rate'), 0)
-            if sp and pt in ('FF','FA'): spins.append(sp)
-            ev = row.get('events','')
+            if sp and pt in ('FF', 'FA'): spins.append(sp)
+            ev = row.get('events', '')
             if ev:
                 pa += 1
                 if ev == 'strikeout': ks += 1
-                elif ev in ('walk','hit_by_pitch'): bbs += 1
+                elif ev in ('walk', 'hit_by_pitch'): bbs += 1
 
         avg = lambda lst, d=1: round(sum(lst)/len(lst), d) if lst else None
         starts.append({
             'date': gdate, 'pitches': len(gr),
             'ff_velo':  avg(ff_v),  'si_velo': avg(si_v),
             'all_velo': avg(all_v), 'ff_spin': avg(spins, 0),
-            'k_pct':  round(ks/pa, 3) if pa else None,
-            'bb_pct': round(bbs/pa,3) if pa else None,
+            'k_pct':  round(ks/pa,  3) if pa else None,
+            'bb_pct': round(bbs/pa, 3) if pa else None,
         })
 
     starts = starts[-n_starts:]
     if not starts:
-        return err(f'No qualifying starts (40+ pitches) found in last 75 days for {display}.')
+        return err(f'No qualifying starts (40+ pitches) in last 75 days for {display}.')
 
-    # season FF velo for comparison
     season_ff = None
     try:
         ars = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true")
-        nk  = ['player_name','last_name, first_name']
-        ar  = find_player(ars, nk, display) or find_player(ars, nk, f"{last}, {first}")
+        ar  = find_player(ars, last, first)
         if ar: season_ff = sf(ar.get('ff_avg_speed'), 1)
     except Exception: pass
 
@@ -261,9 +322,9 @@ def handle_recent(params):
         'velo_dip_note': (
             f'FATIGUE/INJURY SIGNAL: FF down {abs(dip)}mph '
             f'({recent_ff}mph recent vs {season_ff}mph season). '
-            f'Apex lambda boost +8-10%% for opposing team.'
+            f'Apex lambda +8-10%% for opposing team.'
             if dip_flag else
-            f'No meaningful velo drop. Recent {recent_ff}mph vs season {season_ff}mph.'
+            f'No velo drop. Recent {recent_ff}mph vs season {season_ff}mph.'
         ),
         'apex_pitching_inputs': {'veloDipFlag': dip_flag, 'veloDipAmount': dip},
     })
@@ -292,22 +353,22 @@ def handle_bullpen(params):
 
     pitchers = {}
     for row in rows:
-        pid = row.get('pitcher', row.get('pitcher_id',''))
+        pid = row.get('pitcher', row.get('pitcher_id', ''))
         if not pid: continue
         pitchers.setdefault(pid, {
             'name': row.get('player_name', f'ID:{pid}'),
             'id': pid, 'by_date': {}
         })
-        gd = row.get('game_date','')
+        gd = row.get('game_date', '')
         if gd:
             pitchers[pid]['by_date'].setdefault(gd, 0)
             pitchers[pid]['by_date'][gd] += 1
 
-    yesterday  = date_ago(1)
-    relievers  = []
+    yesterday = date_ago(1)
+    relievers = []
     for pid, d in pitchers.items():
         bd = d['by_date']
-        if max(bd.values(), default=0) >= 60: continue   # starter
+        if max(bd.values(), default=0) >= 60: continue
         relievers.append({
             'name':              d['name'],
             'player_id':         pid,
@@ -335,40 +396,14 @@ def handle_bullpen(params):
         'fatigue_level': fatigue,
         'fatigue_note': (
             f'Top-2 relievers threw {top2_pitches} combined pitches in last {days} days. '
-            + (f'Top arm pitched yesterday — likely limited. ' if closer_yday else '')
+            + (f'Top arm pitched yesterday. ' if closer_yday else '')
             + 'Lambda: 60+→+10%, 40-59→+6%, 25-39→+3%, fresh→0%.'
         ),
     })
 
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
-def handle_debug(params):
-    season = int(params.get('season', [2025])[0])
-    result = {}
-    endpoints = {
-        'arsenal_speed': f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true",
-        'expected':      f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true",
-        'percentile':    f"{SAVANT}/leaderboard/percentile-rankings?type=pitcher&year={season}&position=&team=&csv=true",
-    }
-    for name, url in endpoints.items():
-        try:
-            rows = fetch_csv(url)
-            if rows:
-                result[name] = {
-                    'total_rows': len(rows),
-                    'columns': list(rows[0].keys()),
-                    'first_player': {k: rows[0][k] for k in list(rows[0].keys())[:10]},
-                }
-            else:
-                result[name] = {'error': 'empty response'}
-        except Exception as e:
-            result[name] = {'error': str(e)}
-    return ok(result)
-```
 
-Commit changes. Wait for Vercel to deploy (~15 seconds). Then open this URL in your browser:
-```
-https://apex-capper-backend.vercel.app/api/baseball?type=debug&season=2025
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
@@ -379,8 +414,8 @@ class handler(BaseHTTPRequestHandler):
             elif qtype == 'recent':  status, body = handle_recent(params)
             elif qtype == 'bullpen': status, body = handle_bullpen(params)
             else: status, body = err(
-                'type required: season | recent | bullpen  —  '
-                'e.g. ?type=season&name=verlander_justin&season=2026'
+                'type required: debug | season | recent | bullpen  —  '
+                'e.g. ?type=season&name=verlander_justin&season=2025'
             )
         except Exception as e:
             status, body = err(f'Server error: {e} — {traceback.format_exc()}', 500)
