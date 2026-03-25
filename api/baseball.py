@@ -17,8 +17,29 @@ import requests
 SAVANT  = "https://baseballsavant.mlb.com"
 HEADERS = {"User-Agent": "Mozilla/5.0 (ApexCapper/1.0)"}
 
+# ── In-memory response cache ──────────────────────────────────────────────────
+# Savant leaderboard data doesn't change during the day.
+# Cache each unique URL response for 4 hours to eliminate repeat network calls.
+# Key: url string  Value: (timestamp, parsed_rows)
+_CACHE = {}
+CACHE_TTL = 4 * 60 * 60  # 4 hours in seconds
 
-# ── utilities ────────────────────────────────────────────────────────────────
+def fetch_csv(url):
+    now = datetime.now().timestamp()
+    if url in _CACHE:
+        ts, rows = _CACHE[url]
+        if now - ts < CACHE_TTL:
+            return rows          # cache hit — return immediately
+    # Cache miss — fetch from Savant
+    r = requests.get(url, headers=HEADERS, timeout=30)
+    r.raise_for_status()
+    text = r.text.strip()
+    if not text or text.startswith('<'):
+        return []
+    text = clean_csv_text(text)
+    rows = list(csv.DictReader(io.StringIO(text)))
+    _CACHE[url] = (now, rows)   # store with timestamp
+    return rows
 
 def sf(val, decimals=2):
     try:
@@ -44,14 +65,6 @@ def clean_csv_text(text):
         # Strip all " characters from the header line
         lines[0] = lines[0].replace('"', '').strip()
     return '\n'.join(lines)
-
-def fetch_csv(url):
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    text = r.text.strip()
-    if not text or text.startswith('<'): return []
-    text = clean_csv_text(text)
-    return list(csv.DictReader(io.StringIO(text)))
 
 def find_player(rows, last, first):
     """
@@ -131,6 +144,27 @@ def lookup_id(last, first):
         return int(data[0]['id'])
     except Exception:
         return None
+
+
+# ── FULL — combined season + recent in one request ────────────────────────────
+# GET /api/baseball?type=full&name=verlander_justin&season=2026&starts=4
+#
+# Runs handle_season and handle_recent back-to-back.
+# Because both call fetch_csv on the same arsenal URL, the second call
+# returns instantly from the in-memory cache — total network overhead
+# is the same as a single season call.
+# Returns: { name, season: {...}, recent: {...} }
+
+def handle_full(params):
+    season_status, season_body = handle_season(params)
+    recent_status, recent_body = handle_recent(params)
+    season_data = json.loads(season_body)
+    recent_data = json.loads(recent_body)
+    return ok({
+        'name':   season_data.get('name') or recent_data.get('name'),
+        'season': season_data,
+        'recent': recent_data if recent_status == 200 else None,
+    })
 
 
 # ── DEBUG ─────────────────────────────────────────────────────────────────────
@@ -490,16 +524,7 @@ def handle_bullpen(params):
 
 
 # ── Vercel handler ────────────────────────────────────────────────────────────
-def handle_full(params):
-    season_status, season_body = handle_season(params)
-    recent_status, recent_body = handle_recent(params)
-    season_data = json.loads(season_body)
-    recent_data = json.loads(recent_body)
-    return ok({
-        'name':   season_data.get('name') or recent_data.get('name'),
-        'season': season_data,
-        'recent': recent_data if recent_status == 200 else None,
-    })
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         params = parse_qs(urlparse(self.path).query)
@@ -511,8 +536,8 @@ class handler(BaseHTTPRequestHandler):
             elif qtype == 'recent':  status, body = handle_recent(params)
             elif qtype == 'bullpen': status, body = handle_bullpen(params)
             else: status, body = err(
-                'type required: debug | season | recent | bullpen  —  '
-                'e.g. ?type=season&name=verlander_justin&season=2025'
+                'type required: full | season | recent | bullpen | debug  —  '
+                'e.g. ?type=full&name=verlander_justin&season=2026'
             )
         except Exception as e:
             status, body = err(f'Server error: {e} — {traceback.format_exc()}', 500)
