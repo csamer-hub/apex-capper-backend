@@ -6,6 +6,7 @@
 #   /api/baseball?type=season&name=verlander_justin&season=2026
 #   /api/baseball?type=recent&name=verlander_justin&starts=4&player_id=434378
 #   /api/baseball?type=bullpen&team=NYY&days=3
+#   /api/baseball?type=debug&season=2025
 
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -29,48 +30,66 @@ def sf(val, decimals=2):
 def date_ago(days=0):
     return (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
 
+def clean_csv_text(text):
+    """
+    Savant CSVs have a UTF-8 BOM (\ufeff) and the first row is wrapped in
+    quotes: "\ufeff\"last_name\"", " first_name\"", ...
+    This strips all of that so column names are clean plain strings.
+    """
+    # Remove BOM
+    text = text.lstrip('\ufeff')
+    # Remove surrounding quotes from the header line only
+    lines = text.split('\n')
+    if lines:
+        # Strip all " characters from the header line
+        lines[0] = lines[0].replace('"', '').strip()
+    return '\n'.join(lines)
+
 def fetch_csv(url):
     r = requests.get(url, headers=HEADERS, timeout=30)
     r.raise_for_status()
     text = r.text.strip()
     if not text or text.startswith('<'): return []
+    text = clean_csv_text(text)
     return list(csv.DictReader(io.StringIO(text)))
 
 def find_player(rows, last, first):
     """
-    Search Savant CSV rows for a player.
-    Handles ALL known Savant name column formats:
-      - separate 'last_name' + 'first_name' columns  (arsenal CSVs)
-      - 'player_name' as 'Last, First'               (expected stats, percentile)
-      - 'player_name' as 'First Last'                (statcast search)
+    After cleaning, Savant leaderboard CSVs have these name columns:
+      arsenal/expected:  last_name="Webb, Logan"  first_name="657277"  <- STILL SHIFTED
+      
+    Wait — from the debug output the data shows:
+      last_name col = "Webb, Logan"   (name is IN the last_name column as "Last, First")
+      first_name col = "657277"        (this is actually the player ID!)
+      pitcher col = "92.8"             (this is actually the FF velo!)
+    
+    So the CSV is: last_name (="Last, First"), first_name (=player_id), pitcher (=ff_speed), ...
+    The column names after the BOM/quote fix are: last_name, first_name, pitcher, ff_avg_speed...
+    But the VALUES are shifted: last_name holds "Webb, Logan" (combined name),
+    first_name holds the numeric ID, pitcher holds first velocity value.
+    
+    This means: search the 'last_name' column for "Last, First" format.
     """
     last_l  = last.lower().strip()
     first_l = first.lower().strip()
-    full1   = f"{last_l}, {first_l}"   # "verlander, justin"
-    full2   = f"{first_l} {last_l}"    # "justin verlander"
 
     for row in rows:
-        # Format 1: separate last_name / first_name columns (arsenal, exitvelo)
-        row_last  = str(row.get('last_name',  '')).lower().strip()
-        row_first = str(row.get('first_name', '')).lower().strip()
-        if row_last == last_l and row_first == first_l:
-            return row
-        # partial last name match + first name starts with
-        if last_l in row_last and first_l[:3] in row_first:
+        # After BOM fix: 'last_name' column contains "Last, First" combined
+        # e.g. "Webb, Logan" or "Verlander, Justin"
+        ln_col = str(row.get('last_name', '')).lower().strip()
+
+        # Match: "verlander, justin"
+        if last_l in ln_col and first_l in ln_col:
             return row
 
-        # Format 2: player_name = "Last, First" (expected stats, percentile)
-        pname = str(row.get('player_name', '')).lower().strip()
-        if full1 in pname or pname in full1:
+        # Also check player_name column (percentile endpoint)
+        pn_col = str(row.get('player_name', '')).lower().strip()
+        if last_l in pn_col and first_l in pn_col:
             return row
 
-        # Format 3: player_name = "First Last" (statcast search CSV)
-        if full2 in pname or pname in full2:
-            return row
-
-        # Format 4: any column containing both last and first name
-        row_str = ' '.join(str(v) for v in row.values()).lower()
-        if last_l in row_str and first_l in row_str:
+        # Fallback: search all values in the row
+        all_vals = ' '.join(str(v) for v in row.values()).lower()
+        if last_l in all_vals and first_l in all_vals:
             return row
 
     return None
@@ -83,7 +102,22 @@ def yr(): return datetime.now().year
 # ── player ID lookup ──────────────────────────────────────────────────────────
 
 def lookup_id(last, first):
-    """Resolve MLBAM ID via Baseball Savant player search."""
+    """Resolve MLBAM ID. After BOM fix, 'first_name' col actually holds the player ID."""
+    # First try: get ID directly from the arsenal CSV (first_name col = ID after shift)
+    try:
+        rows = fetch_csv(
+            f"{SAVANT}/leaderboard/pitch-arsenals?year={yr()}&min=100&type=avg_speed&hand=&csv=true"
+        )
+        row = find_player(rows, last, first)
+        if row:
+            # After column shift: 'first_name' column actually holds the MLBAM ID
+            pid = row.get('first_name', '')
+            if pid and str(pid).isdigit():
+                return int(pid)
+    except Exception:
+        pass
+
+    # Fallback: Savant player search API
     try:
         r = requests.get(
             f"{SAVANT}/player/search-all?search={first}+{last}",
@@ -95,17 +129,13 @@ def lookup_id(last, first):
             if str(p.get('pos', '')).upper() in ('P', 'SP', 'RP'):
                 return int(p['id'])
         return int(data[0]['id'])
-    except Exception: return None
+    except Exception:
+        return None
 
 
-# ── DEBUG — dumps raw columns from each Savant endpoint ──────────────────────
+# ── DEBUG ─────────────────────────────────────────────────────────────────────
 
 def handle_debug(params):
-    """
-    Temporary diagnostic endpoint.
-    Shows real column names + first player row from each Savant CSV.
-    Use: /api/baseball?type=debug&season=2025
-    """
     season = int(params.get('season', [yr()])[0])
     result = {}
     endpoints = {
@@ -121,11 +151,12 @@ def handle_debug(params):
                     'total_rows':   len(rows),
                     'columns':      list(rows[0].keys()),
                     'first_player': dict(list(rows[0].items())[:12]),
+                    'second_player': dict(list(rows[1].items())[:12]) if len(rows) > 1 else {},
                 }
             else:
                 result[name] = {'error': 'empty response'}
         except Exception as e:
-            result[name] = {'error': str(e)}
+            result[name] = {'error': str(e), 'trace': traceback.format_exc()}
     return ok(result)
 
 
@@ -143,33 +174,77 @@ def handle_season(params):
     display = f"{first.title()} {last.title()}"
     result  = {'name': display, 'season': season, 'sources': []}
 
-    # 1 — velocity per pitch type
+    # ── 1. velocity per pitch type ─────────────────────────────────────────
+    # Column layout after BOM fix (values are shifted 1 right vs headers):
+    #   last_name="Verlander, Justin"  first_name=434378(ID)  pitcher=ff_speed  ff_avg_speed=si_speed ...
+    # So actual pitch velocities are in columns SHIFTED by the header confusion.
+    # We read them by their header names which are now correct after clean_csv_text.
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true")
         row  = find_player(rows, last, first)
         if row:
+            # The column named 'pitcher' actually holds FF velo (due to the shift)
+            # The column named 'ff_avg_speed' holds SI velo, etc.
+            # Map what we actually want:
+            # From debug: columns = [last_name, first_name, pitcher, ff_avg_speed, si_avg_speed, fc_avg_speed, sl_avg_speed, ch_avg_speed, cu_avg_speed, fs_avg_speed, kn_avg_speed, st_avg_speed, sv_avg_speed]
+            # From debug first_player values: pitcher=92.8(FF), ff_avg_speed=92.6(SI), si_avg_speed=91(FC?), fc_avg_speed="", sl_avg_speed=86.5, ch_avg_speed="", etc.
+            # The shift means: real FF = 'pitcher' col, real SI = 'ff_avg_speed' col, etc.
+            # BUT: this only applies when the BOM causes a 1-col rightward shift.
+            # After our clean_csv_text strips the BOM+quotes, the headers should be correct.
+            # Let's try reading the named columns directly first:
             velo = {}
-            for pt in ['ff','si','sl','ch','cu','fc','fs','kc','st']:
-                v = sf(row.get(f'{pt}_avg_speed'), 1)
+            col_map = {
+                'ff': 'pitcher',        # FF velo is in 'pitcher' col after shift
+                'si': 'ff_avg_speed',
+                'fc': 'si_avg_speed',
+                'sl': 'sl_avg_speed',
+                'ch': 'ch_avg_speed',
+                'cu': 'cu_avg_speed',
+                'fs': 'fs_avg_speed',
+                'st': 'st_avg_speed',
+                'kn': 'kn_avg_speed',
+            }
+            for pt, col in col_map.items():
+                v = sf(row.get(col), 1)
                 if v: velo[f'{pt}_velo'] = v
-            result['velo_by_pitch'] = velo
-            result['sources'].append('savant_arsenal_speed')
+            if velo:
+                result['velo_by_pitch'] = velo
+                result['sources'].append('savant_arsenal_speed')
+                result['_velo_note'] = 'Column mapping adjusted for Savant BOM/shift quirk'
     except Exception as e: result['velo_error'] = str(e)
 
-    # 2 — spin rate per pitch type
+    # ── 2. spin rate per pitch type ────────────────────────────────────────
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_spin&hand=&csv=true")
         row  = find_player(rows, last, first)
         if row:
             spin = {}
-            for pt in ['ff','si','sl','ch','cu','fc']:
-                s = sf(row.get(f'{pt}_avg_spin'), 0)
+            # Same shift applies — use shifted col names
+            spin_map = {
+                'ff': 'pitcher',
+                'si': 'ff_avg_spin',
+                'sl': 'sl_avg_spin',
+                'ch': 'ch_avg_spin',
+                'cu': 'cu_avg_spin',
+            }
+            for pt, col in spin_map.items():
+                s = sf(row.get(col), 0)
                 if s: spin[f'{pt}_spin'] = s
-            result['spin_by_pitch'] = spin
-            result['sources'].append('savant_arsenal_spin')
+            if spin:
+                result['spin_by_pitch'] = spin
+                result['sources'].append('savant_arsenal_spin')
     except Exception as e: result['spin_error'] = str(e)
 
-    # 3 — xERA / expected stats
+    # ── 3. xERA / expected stats ───────────────────────────────────────────
+    # Expected stats CSV column layout from debug:
+    # [last_name, first_name, player_id, year, pa, bip, ba, est_ba, ...]
+    # Values: last_name="Webb, Logan", first_name=657277(ID), player_id=2025(YEAR!), year=856(PA)...
+    # Shift: each value is one column to the right of its actual meaning
+    # real player_id = first_name col, real year = player_id col, real pa = year col, etc.
+    # real era = ? , real xera = ?
+    # Columns: last_name, first_name, player_id, year, pa, bip, ba, est_ba, est_ba_minus_ba_diff,
+    #          slg, est_slg, est_slg_minus_slg_diff, woba, est_woba, est_woba_minus_woba_diff, era, xera, era_minus_xera_diff
+    # Shifted cols: era is in 'era' col, xera is in 'xera' col — these are far enough right to be correct
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/expected_statistics?type=pitcher&year={season}&position=&team=&min=q&csv=true")
         row  = find_player(rows, last, first)
@@ -179,24 +254,27 @@ def handle_season(params):
             result.update({
                 'era':   era,
                 'xera':  xera,
-                'xwoba': sf(row.get('xwoba')),
-                'xba':   sf(row.get('xba')),
-                'pa':    sf(row.get('pa'), 0),
+                'xwoba': sf(row.get('est_woba')),
+                'xba':   sf(row.get('est_ba')),
             })
             if era is not None and xera is not None:
                 gap = round(xera - era, 2)
                 result['era_xera_gap'] = gap
-                if   gap >=  1.5:  sig, note = 'HIGH_REGRESSION_RISK',      f'xERA {gap} above ERA — pitcher has been lucky, expect more runs.'
-                elif gap >=  0.75: sig, note = 'MODERATE_REGRESSION_RISK',  f'xERA {gap} above ERA — mild regression risk.'
-                elif gap <= -1.5:  sig, note = 'IMPROVEMENT_LIKELY',        f'ERA {abs(gap)} above xERA — pitcher unlucky, expect fewer runs.'
-                elif gap <= -0.75: sig, note = 'MILD_IMPROVEMENT',          f'ERA {abs(gap)} above xERA — mild improvement likely.'
-                else:              sig, note = 'NEUTRAL',                   'ERA and xERA aligned — no regression signal.'
+                if   gap >=  1.5:  sig, note = 'HIGH_REGRESSION_RISK',     f'xERA {gap} above ERA — pitcher has been lucky, expect more runs.'
+                elif gap >=  0.75: sig, note = 'MODERATE_REGRESSION_RISK', f'xERA {gap} above ERA — mild regression risk.'
+                elif gap <= -1.5:  sig, note = 'IMPROVEMENT_LIKELY',       f'ERA {abs(gap)} above xERA — pitcher unlucky, expect fewer runs.'
+                elif gap <= -0.75: sig, note = 'MILD_IMPROVEMENT',         f'ERA {abs(gap)} above xERA — mild improvement likely.'
+                else:              sig, note = 'NEUTRAL',                  'ERA and xERA aligned — no regression signal.'
                 result['regression_signal'] = sig
                 result['regression_note']   = note
             result['sources'].append('savant_expected')
     except Exception as e: result['expected_error'] = str(e)
 
-    # 4 — percentile ranks
+    # ── 4. percentile ranks ────────────────────────────────────────────────
+    # Percentile CSV: player_name col = "Fedde, Erick" (clean, no shift issue here)
+    # Columns: player_name, player_id, year, xwoba, xba, xslg, xiso, xobp,
+    #          brl, brl_percent, exit_velocity, max_ev, hard_hit_percent,
+    #          k_percent, bb_percent, whiff_percent, chase_percent, xera, fb_velocity, fb_spin, curve_spin
     try:
         rows = fetch_csv(f"{SAVANT}/leaderboard/percentile-rankings?type=pitcher&year={season}&position=&team=&csv=true")
         row  = find_player(rows, last, first)
@@ -208,7 +286,9 @@ def handle_season(params):
                 'hard_hit': sf(row.get('hard_hit_percent'), 0),
                 'barrel':   sf(row.get('brl_percent'),      0),
                 'whiff':    sf(row.get('whiff_percent'),    0),
-                'chase':    sf(row.get('oz_swing_percent'), 0),
+                'chase':    sf(row.get('chase_percent'),    0),
+                'fb_velo':  sf(row.get('fb_velocity'),      0),
+                'fb_spin':  sf(row.get('fb_spin'),          0),
             }
             result['sources'].append('savant_percentiles')
     except Exception as e: result['percentile_error'] = str(e)
@@ -216,8 +296,8 @@ def handle_season(params):
     if not result['sources']:
         result['warning'] = (
             f'No data found for "{display}" in {season}. '
-            'Try the debug endpoint to see raw column names: '
-            '?type=debug&season=2025'
+            'Try: ?type=debug&season=2025 to see raw column layout. '
+            'Also check spelling — format: verlander_justin'
         )
     return ok(result)
 
@@ -239,8 +319,7 @@ def handle_recent(params):
     if not mlbam:
         return err(
             f'Could not resolve player ID for "{display}". '
-            'Pass player_id directly — find MLBAM ID at baseballsavant.mlb.com',
-            404
+            'Pass player_id= directly. Find it at baseballsavant.mlb.com', 404
         )
 
     url = (
@@ -251,8 +330,10 @@ def handle_recent(params):
         f"&game_type=R&min_pitches=0&min_results=0"
         f"&group_by=name&sort_col=pitches&sort_order=desc&type=details"
     )
-    try:    rows = fetch_csv(url)
-    except Exception as e: return err(f'Statcast fetch failed: {e}', 500)
+    try:
+        rows = fetch_csv(url)
+    except Exception as e:
+        return err(f'Statcast fetch failed: {e}', 500)
     if not rows:
         return err(f'No pitch data for {display} (ID:{mlbam}) in last 75 days.', 404)
 
@@ -295,11 +376,12 @@ def handle_recent(params):
     if not starts:
         return err(f'No qualifying starts (40+ pitches) in last 75 days for {display}.')
 
+    # Season FF velo from arsenal — use 'pitcher' col (shifted FF velo)
     season_ff = None
     try:
         ars = fetch_csv(f"{SAVANT}/leaderboard/pitch-arsenals?year={season}&min=100&type=avg_speed&hand=&csv=true")
         ar  = find_player(ars, last, first)
-        if ar: season_ff = sf(ar.get('ff_avg_speed'), 1)
+        if ar: season_ff = sf(ar.get('pitcher'), 1)  # 'pitcher' col = FF velo after shift
     except Exception: pass
 
     ff_list   = [s['ff_velo'] for s in starts if s['ff_velo']]
@@ -324,7 +406,7 @@ def handle_recent(params):
             f'({recent_ff}mph recent vs {season_ff}mph season). '
             f'Apex lambda +8-10%% for opposing team.'
             if dip_flag else
-            f'No velo drop. Recent {recent_ff}mph vs season {season_ff}mph.'
+            f'No velo drop detected. Recent {recent_ff}mph vs season {season_ff}mph.'
         ),
         'apex_pitching_inputs': {'veloDipFlag': dip_flag, 'veloDipAmount': dip},
     })
