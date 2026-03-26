@@ -1,95 +1,116 @@
-// api/odds.js — ALL odds sources consolidated
-// source=fanatics (default) | source=pinnacle
-// Fanatics: The Odds API (ODDS_API_KEY)
-// Pinnacle: OddsPapi (ODDSPAPI_KEY)
+// api/odds.js — APEX CAPPER backend proxy
+// Handles The Odds API (Fanatics/DK/FD/BetMGM) + OddsPapi (Pinnacle)
+// CORS headers applied to EVERY response path — required for Claude artifact iframe
 
 export default async function handler(req, res) {
+  // ── CORS — must be set before ANY res.status().json() call ──────────────────
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") return res.status(200).end();
-  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Max-Age", "86400"); // cache preflight 24h
 
-  const { source = "fanatics" } = req.query;
-
-  // ── FANATICS / THE ODDS API ───────────────────────────────────────────────
-  if (source === "fanatics" || source === "odds") {
-    const ODDS_API_KEY = process.env.ODDS_API_KEY;
-    if (!ODDS_API_KEY) return res.status(500).json({ error: "ODDS_API_KEY not configured" });
-
-    const { sport = "upcoming", markets = "h2h,spreads,totals",
-            regions = "us", bookmakers = "fanduel,draftkings,fanatics,betmgm",
-            eventId, oddsFormat = "american", dateFormat = "iso" } = req.query;
-
-    try {
-      let url;
-      if (eventId) {
-        url = `https://api.the-odds-api.com/v4/sports/${sport}/events/${eventId}/odds?` +
-          new URLSearchParams({ apiKey: ODDS_API_KEY, markets, regions, bookmakers, oddsFormat, dateFormat });
-      } else {
-        url = `https://api.the-odds-api.com/v4/sports/${sport}/odds?` +
-          new URLSearchParams({ apiKey: ODDS_API_KEY, markets, regions, bookmakers, oddsFormat, dateFormat });
-      }
-      const r = await fetch(url);
-      const quotaRemaining = r.headers.get("x-requests-remaining");
-      const quotaUsed = r.headers.get("x-requests-used");
-      if (!r.ok) return res.status(r.status).json({ error: `Odds API error: ${r.status}`, detail: await r.text() });
-      const data = await r.json();
-      return res.status(200).json({ data, meta: { quotaRemaining: quotaRemaining ? parseInt(quotaRemaining) : null,
-        quotaUsed: quotaUsed ? parseInt(quotaUsed) : null, sport, markets, bookmakers, fetchedAt: new Date().toISOString() } });
-    } catch (err) {
-      return res.status(500).json({ error: "Odds API error", detail: err.message });
-    }
+  // Handle preflight — must return 200, not 204
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
   }
 
-  // ── SPORTS LIST (The Odds API) ────────────────────────────────────────────
-  if (source === "sports") {
-    const ODDS_API_KEY = process.env.ODDS_API_KEY;
-    if (!ODDS_API_KEY) return res.status(500).json({ error: "ODDS_API_KEY not configured" });
-    try {
-      const r = await fetch(`https://api.the-odds-api.com/v4/sports?apiKey=${ODDS_API_KEY}&all=true`);
-      const data = await r.json();
-      return res.status(200).json({ data });
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
+  if (req.method !== "GET") {
+    return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ── PINNACLE / ODDSPAPI ───────────────────────────────────────────────────
+  const { source } = req.query;
+
+  // ── Route: Pinnacle via OddsPapi ─────────────────────────────────────────────
   if (source === "pinnacle") {
     const ODDSPAPI_KEY = process.env.ODDSPAPI_KEY;
-    if (!ODDSPAPI_KEY) return res.status(500).json({ error: "ODDSPAPI_KEY not configured" });
+    if (!ODDSPAPI_KEY) {
+      return res.status(500).json({ error: "ODDSPAPI_KEY not configured" });
+    }
 
-    const { sportId, tournamentId, fixtureId, oddsFormat = "american" } = req.query;
+    const { sportId, tournamentId, oddsFormat = "american" } = req.query;
 
     try {
       let url;
-      if (fixtureId) {
-        url = `https://api.oddspapi.io/v4/odds?fixtureId=${fixtureId}&bookmaker=pinnacle&oddsFormat=${oddsFormat}&apiKey=${ODDSPAPI_KEY}`;
-      } else if (tournamentId) {
-        url = `https://api.oddspapi.io/v4/odds-by-tournaments?tournamentIds=${tournamentId}&bookmaker=pinnacle&oddsFormat=${oddsFormat}&apiKey=${ODDSPAPI_KEY}`;
+      if (tournamentId) {
+        // Fetch odds for a specific tournament
+        url = `https://api.oddspapi.com/fixtures?key=${ODDSPAPI_KEY}&tournamentId=${tournamentId}&oddsFormat=${oddsFormat}&bookmakers=pinnacle&include=bookmakerOdds`;
       } else if (sportId) {
-        url = `https://api.oddspapi.io/v4/tournaments?sportId=${sportId}&apiKey=${ODDSPAPI_KEY}`;
+        // Fetch tournament list for a sport
+        url = `https://api.oddspapi.com/tournaments?key=${ODDSPAPI_KEY}&sportId=${sportId}`;
       } else {
-        return res.status(400).json({ error: "Provide sportId, tournamentId, or fixtureId" });
+        return res.status(400).json({ error: "Provide sportId or tournamentId" });
       }
-      const r = await fetch(url);
-      if (!r.ok) return res.status(r.status).json({ error: `OddsPapi error: ${r.status}`, detail: await r.text() });
-      const data = await r.json();
-      return res.status(200).json({ data, fetchedAt: new Date().toISOString(), oddsFormat });
+
+      const response = await fetch(url, { headers: { "Accept": "application/json" } });
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => "");
+        return res.status(response.status).json({
+          error: `OddsPapi error ${response.status}`,
+          detail: errText.slice(0, 200)
+        });
+      }
+
+      const data = await response.json();
+      return res.status(200).json({ data: data.data || data, meta: data.meta || null });
+
     } catch (err) {
-      return res.status(500).json({ error: "OddsPapi error", detail: err.message });
+      return res.status(500).json({ error: "Pinnacle fetch failed", detail: err.message });
     }
   }
 
-  return res.status(400).json({
-    error: "Invalid source",
-    validSources: ["fanatics", "pinnacle", "sports"],
-    examples: [
-      "/api/odds?source=fanatics&sport=basketball_nba&markets=h2h,spreads,totals",
-      "/api/odds?source=pinnacle&sportId=10",
-      "/api/odds?source=pinnacle&tournamentId=17",
-      "/api/odds?source=sports",
-    ]
-  });
+  // ── Route: The Odds API (Fanatics, DraftKings, FanDuel, BetMGM) ─────────────
+  const ODDS_API_KEY = process.env.ODDS_API_KEY;
+  if (!ODDS_API_KEY) {
+    return res.status(500).json({ error: "ODDS_API_KEY not configured" });
+  }
+
+  const {
+    sport = "upcoming",
+    markets = "h2h,spreads,totals",
+    bookmakers = "fanatics,draftkings,fanduel,betmgm",
+    oddsFormat = "american",
+    dateFormat = "iso",
+  } = req.query;
+
+  try {
+    const url = new URL(`https://api.the-odds-api.com/v4/sports/${sport}/odds`);
+    url.searchParams.set("apiKey", ODDS_API_KEY);
+    url.searchParams.set("regions", "us");
+    url.searchParams.set("markets", markets);
+    url.searchParams.set("bookmakers", bookmakers);
+    url.searchParams.set("oddsFormat", oddsFormat);
+    url.searchParams.set("dateFormat", dateFormat);
+
+    const response = await fetch(url.toString(), {
+      headers: { "Accept": "application/json" }
+    });
+
+    // Pass through quota headers from The Odds API
+    const quotaRemaining = response.headers.get("x-requests-remaining");
+    const quotaUsed = response.headers.get("x-requests-used");
+
+    if (!response.ok) {
+      const errText = await response.text().catch(() => "");
+      return res.status(response.status).json({
+        error: `Odds API error ${response.status}`,
+        detail: errText.slice(0, 200)
+      });
+    }
+
+    const data = await response.json();
+    return res.status(200).json({
+      data,
+      meta: {
+        sport,
+        markets,
+        quotaRemaining: quotaRemaining ? parseInt(quotaRemaining) : null,
+        quotaUsed: quotaUsed ? parseInt(quotaUsed) : null,
+        timestamp: new Date().toISOString(),
+      }
+    });
+
+  } catch (err) {
+    return res.status(500).json({ error: "Odds fetch failed", detail: err.message });
+  }
 }
