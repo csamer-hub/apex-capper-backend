@@ -68,7 +68,7 @@ export default async function handler(req, res) {
   const {
     sport = "upcoming",
     markets = "h2h,spreads,totals",
-    bookmakers = "fanatics,draftkings,fanduel,betmgm",
+    bookmakers = "",
     oddsFormat = "american",
     dateFormat = "iso",
   } = req.query;
@@ -78,7 +78,8 @@ export default async function handler(req, res) {
     url.searchParams.set("apiKey", ODDS_API_KEY);
     url.searchParams.set("regions", "us");
     url.searchParams.set("markets", markets);
-    url.searchParams.set("bookmakers", bookmakers);
+    // Only filter by bookmakers if explicitly requested — otherwise get all US books
+    if (bookmakers) url.searchParams.set("bookmakers", bookmakers);
     url.searchParams.set("oddsFormat", oddsFormat);
     url.searchParams.set("dateFormat", dateFormat);
 
