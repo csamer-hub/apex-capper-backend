@@ -14,7 +14,17 @@ export default async function handler(req, res) {
   }
 
   try {
-    const body = req.body;
+    // Vercel auto-parses JSON body when Content-Type is application/json
+    // fallback to manual parse if body comes in as string
+    let body = req.body;
+    if (!body || typeof body === 'string') {
+      try { body = JSON.parse(body || '{}'); } catch { body = {}; }
+    }
+
+    if (!body.messages || !body.messages.length) {
+      return res.status(400).json({ error: "messages array required" });
+    }
+
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -27,17 +37,20 @@ export default async function handler(req, res) {
         model: body.model || "claude-sonnet-4-20250514",
         max_tokens: body.max_tokens || 1000,
         system: body.system || "",
-        messages: body.messages || [],
+        messages: body.messages,
         tools: [{ type: "web_search_20250305", name: "web_search" }]
       })
     });
 
+    const data = await response.json();
+
     if (!response.ok) {
-      const err = await response.text().catch(() => "");
-      return res.status(response.status).json({ error: `Anthropic error ${response.status}`, detail: err.slice(0, 300) });
+      return res.status(response.status).json({
+        error: `Anthropic error ${response.status}`,
+        detail: data?.error?.message || JSON.stringify(data).slice(0, 300)
+      });
     }
 
-    const data = await response.json();
     return res.status(200).json(data);
 
   } catch (err) {
