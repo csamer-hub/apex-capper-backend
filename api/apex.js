@@ -1,4 +1,5 @@
-// api/apex.js — Anthropic API proxy (GET-based to avoid CORS preflight from file://)
+// api/apex.js — Anthropic API proxy
+// GET ?q= to avoid CORS preflight from file:// origins
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -13,12 +14,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Support both GET (q= param, avoids preflight) and POST (body)
     let messages, system, model, max_tokens;
 
     if (req.method === "GET") {
       const raw = req.query.q;
-      if (!raw) return res.status(400).json({ error: "q param required for GET" });
+      if (!raw) return res.status(400).json({ error: "q param required" });
       const parsed = JSON.parse(decodeURIComponent(raw));
       messages   = parsed.messages;
       system     = parsed.system;
@@ -38,13 +38,14 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "messages required", method: req.method });
     }
 
-    const payload = {
+    // No web search tool — keeps response simple (single turn, text only)
+    // Baseball knowledge is in training data, no search needed
+    const anthropicPayload = {
       model:      model      || "claude-sonnet-4-20250514",
       max_tokens: max_tokens || 1024,
       messages,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
     };
-    if (system) payload.system = system;
+    if (system) anthropicPayload.system = system;
 
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -52,9 +53,8 @@ export default async function handler(req, res) {
         "Content-Type":      "application/json",
         "x-api-key":         ANTHROPIC_KEY,
         "anthropic-version": "2023-06-01",
-        "anthropic-beta":    "web-search-2025-03-05",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(anthropicPayload),
     });
 
     const data = await response.json();
