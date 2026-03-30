@@ -1,73 +1,47 @@
-// api/apex.js — Anthropic API proxy
-// GET ?q= to avoid CORS preflight from file:// origins
+// api/apex.js — Anthropic proxy, GET ?q= avoids CORS preflight from file://
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-  if (!ANTHROPIC_KEY) {
-    return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
-  }
+  const KEY = process.env.ANTHROPIC_API_KEY;
+  if (!KEY) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
   try {
-    let messages, system, model, max_tokens;
-
-    if (req.method === "GET") {
-      const raw = req.query.q;
-      if (!raw) return res.status(400).json({ error: "q param required" });
-      const parsed = JSON.parse(decodeURIComponent(raw));
-      messages   = parsed.messages;
-      system     = parsed.system;
-      model      = parsed.model;
-      max_tokens = parsed.max_tokens;
-    } else {
-      let body = req.body;
-      if (typeof body === "string") { try { body = JSON.parse(body); } catch { body = {}; } }
-      if (!body || typeof body !== "object") body = {};
-      messages   = body.messages;
-      system     = body.system;
-      model      = body.model;
-      max_tokens = body.max_tokens;
+    let body = {};
+    if (req.method === "GET" && req.query.q) {
+      body = JSON.parse(decodeURIComponent(req.query.q));
+    } else if (req.method === "POST") {
+      body = typeof req.body === "string" ? JSON.parse(req.body) : req.body || {};
     }
 
-    if (!messages || !Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({ error: "messages required", method: req.method });
-    }
+    const { messages, system, model, max_tokens } = body;
+    if (!messages?.length) return res.status(400).json({ error: "messages required" });
 
-    // No web search tool — keeps response simple (single turn, text only)
-    // Baseball knowledge is in training data, no search needed
-    const anthropicPayload = {
-      model:      model      || "claude-sonnet-4-20250514",
-      max_tokens: max_tokens || 1024,
+    const payload = {
+      model:      model      || "claude-haiku-4-5-20251001",
+      max_tokens: max_tokens || 400,
       messages,
     };
-    if (system) anthropicPayload.system = system;
+    if (system) payload.system = system;
 
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "Content-Type":      "application/json",
-        "x-api-key":         ANTHROPIC_KEY,
+        "x-api-key":         KEY,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify(anthropicPayload),
+      body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(response.status).json({
-        error:  `Anthropic error ${response.status}`,
-        detail: data?.error?.message || JSON.stringify(data).slice(0, 300),
-      });
-    }
-
+    const data = await r.json();
+    if (!r.ok) return res.status(r.status).json({ error: data?.error?.message || "Anthropic error", detail: JSON.stringify(data).slice(0,200) });
     return res.status(200).json(data);
 
-  } catch (err) {
-    return res.status(500).json({ error: "Proxy error", detail: err.message });
+  } catch (e) {
+    return res.status(500).json({ error: "Proxy error", detail: e.message });
   }
 }
