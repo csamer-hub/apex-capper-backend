@@ -1,4 +1,6 @@
-// api/apex.js — Anthropic proxy with manual body parsing
+// api/apex.js — Anthropic proxy
+export const config = { api: { bodyParser: true } };
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -12,33 +14,29 @@ export default async function handler(req, res) {
     let body = {};
 
     if (req.method === "POST") {
-      // Manually collect body chunks — Vercel ESM doesn't auto-parse
-      const raw = await new Promise((resolve, reject) => {
-        let data = "";
-        req.on("data", chunk => { data += chunk; });
-        req.on("end", () => resolve(data));
-        req.on("error", reject);
-      });
-      try {
-        body = JSON.parse(raw);
-      } catch (e) {
-        return res.status(400).json({ error: "Invalid JSON body", detail: e.message });
+      body = req.body || {};
+      if (typeof body === "string") {
+        try { body = JSON.parse(body); } catch(e) {
+          return res.status(400).json({ error: "Invalid JSON", detail: e.message });
+        }
       }
     } else if (req.method === "GET" && req.query.q) {
+      const raw = decodeURIComponent(req.query.q);
       try {
-        body = JSON.parse(decodeURIComponent(req.query.q));
-      } catch (e) {
-        // treat as plain text prompt
-        body = { messages: [{ role: "user", content: decodeURIComponent(req.query.q) }] };
+        body = JSON.parse(raw);
+      } catch(e) {
+        body = { messages: [{ role: "user", content: raw }] };
       }
     }
 
     const { messages, system, model, max_tokens } = body;
-    if (!messages?.length) return res.status(400).json({ error: "messages required" });
+    if (!messages || !messages.length) {
+      return res.status(400).json({ error: "messages required", received: JSON.stringify(body).slice(0, 100) });
+    }
 
     const payload = {
       model:      model      || "claude-haiku-4-5-20251001",
-      max_tokens: max_tokens || 800,
+      max_tokens: max_tokens || 1000,
       messages,
     };
     if (system) payload.system = system;
