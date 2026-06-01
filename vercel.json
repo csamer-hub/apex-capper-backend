@@ -2,6 +2,15 @@
   "functions": {
     "api/baseball.py": {
       "maxDuration": 30
+    },
+    "api/grade-picks.js": {
+      "maxDuration": 60
     }
-  }
+  },
+  "crons": [
+    {
+      "path": "/api/grade-picks",
+      "schedule": "0 */2 * * *"
+    }
+  ]
 }
