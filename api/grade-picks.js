@@ -282,7 +282,7 @@ async function gradePick(pick) {
 
 // ── HTTP HANDLER ───────────────────────────────────────────
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   // CORS for manual testing
   res.setHeader('Access-Control-Allow-Origin', '*');
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -342,4 +342,4 @@ module.exports = async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message, stack: e.stack?.split('\n').slice(0,5) });
   }
-};
+}
