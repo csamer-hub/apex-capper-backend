@@ -50,7 +50,7 @@ export default async function handler(req, res) {
 
     // Build Anthropic payload — NO web search tool (causes tool_use stop reason, breaks single-turn)
     const payload = {
-      model:      model      || "claude-sonnet-4-20250514",
+      model:      model      || "claude-sonnet-5-5",
       max_tokens: max_tokens || 2000,
       messages,
     };
