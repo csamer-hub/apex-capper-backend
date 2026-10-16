@@ -366,7 +366,7 @@ def handle_recent(params):
         f"all=true&player_type=pitcher"
         f"&game_date_gt={date_ago(75)}&game_date_lt={date_ago(0)}"
         f"&pitchers_lookup[]={mlbam}"
-        f"&game_type=R&min_pitches=0&min_results=0"
+        f"&game_type=R|F|D|L|W&min_pitches=0&min_results=0"  # R=reg + F/D/L/W=postseason rounds
         f"&group_by=name&sort_col=pitches&sort_order=desc&type=details"
     )
     try:
@@ -463,7 +463,7 @@ def handle_bullpen(params):
         f"{SAVANT}/statcast_search/csv?"
         f"all=true&player_type=pitcher"
         f"&game_date_gt={date_ago(days)}&game_date_lt={date_ago(0)}"
-        f"&team={team}&game_type=R"
+        f"&team={team}&game_type=R|F|D|L|W"  # include postseason rounds, not just regular season
         f"&min_pitches=0&min_results=0"
         f"&group_by=name&sort_col=pitches&sort_order=desc&type=details"
     )
@@ -476,19 +476,26 @@ def handle_bullpen(params):
     for row in rows:
         pid = row.get('pitcher', row.get('pitcher_id', ''))
         if not pid: continue
-        pitchers.setdefault(pid, {
+        p = pitchers.setdefault(pid, {
             'name': row.get('player_name', f'ID:{pid}'),
-            'id': pid, 'by_date': {}
+            'id': pid, 'by_date': {}, 'min_inning': 99
         })
         gd = row.get('game_date', '')
         if gd:
-            pitchers[pid]['by_date'].setdefault(gd, 0)
-            pitchers[pid]['by_date'][gd] += 1
+            p['by_date'].setdefault(gd, 0)
+            p['by_date'][gd] += 1
+        inn = sf(row.get('inning'), 0)   # track earliest inning this pitcher appeared
+        if inn and inn < p['min_inning']:
+            p['min_inning'] = int(inn)
 
     yesterday = date_ago(1)
     relievers = []
     for pid, d in pitchers.items():
         bd = d['by_date']
+        # Exclude TRUE starters so an early-hook blowup (pulled <60 pitches) can't
+        # masquerade as a fatigued reliever and trip a false HEAVY flag: drop anyone
+        # whose first appearance was inning 1, or who threw 60+ in any single game.
+        if d.get('min_inning', 99) == 1: continue
         if max(bd.values(), default=0) >= 60: continue
         relievers.append({
             'name':              d['name'],
