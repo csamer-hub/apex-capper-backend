@@ -151,35 +151,93 @@ function gameScoreDetail(game) {
   return `${game.teams.away.team.name} ${a} - ${game.teams.home.team.name} ${h}`;
 }
 
-function gradeMoneyline(pick, game) {
+// Is this a First-5-Innings pick? F5 is a core strategy market, so it must
+// grade on innings 1–5, not the 9-inning final.
+function isF5(pick) {
+  const m = (pick.market || '').toLowerCase();
+  if (m.startsWith('f5') || m.includes('first5') || m.includes('first_5')) return true;
+  const t = (pick.pick_text || '').toLowerCase();
+  return /\bf5\b|first 5|first five|1st 5|through 5/.test(t);
+}
+
+// Sum runs over the first N innings from the linescore innings array.
+// Returns null if the game didn't complete N innings (rain-shortened), so the
+// caller leaves the pick pending rather than grading on partial data.
+function firstNRuns(game, n) {
+  const innings = game.linescore?.innings;
+  if (!Array.isArray(innings) || innings.length < n) return null;
+  let a = 0, h = 0;
+  for (let i = 0; i < n; i++) {
+    a += innings[i]?.away?.runs ?? 0;
+    h += innings[i]?.home?.runs ?? 0;
+  }
+  return { away: a, home: h };
+}
+
+// Robust team → side matcher. Handles shared-nickname collisions like
+// Red Sox / White Sox, where a naive "last word" check mis-assigns the side.
+function teamSide(pickedTeam, awayName, homeName) {
+  const pn = norm(pickedTeam);
+  const an = norm(awayName), hn = norm(homeName);
+  // 1. Full-name containment, either direction — strongest signal.
+  const awayFull = an.includes(pn) || pn.includes(an);
+  const homeFull = hn.includes(pn) || pn.includes(hn);
+  if (awayFull && !homeFull) return 'away';
+  if (homeFull && !awayFull) return 'home';
+  // 2. Nickname (last word) only when the two teams' nicknames differ.
+  const anNick = an.split(' ').pop(), hnNick = hn.split(' ').pop();
+  if (anNick !== hnNick) {
+    const a = pn.includes(anNick), h = pn.includes(hnNick);
+    if (a && !h) return 'away';
+    if (h && !a) return 'home';
+  } else {
+    // Shared nickname (e.g. "sox"): decide on the distinguishing city/color word.
+    const overlap = full => full.split(' ').filter(w => w && pn.includes(w)).length;
+    const ao = overlap(an), ho = overlap(hn);
+    if (ao > ho) return 'away';
+    if (ho > ao) return 'home';
+  }
+  return null;
+}
+
+function gradeMoneyline(pick, game, innings = null) {
   if (!isGameFinal(game)) return { status: 'pending', reason: 'not_final' };
-  const awayRuns = game.linescore?.teams?.away?.runs;
-  const homeRuns = game.linescore?.teams?.home?.runs;
+  let awayRuns, homeRuns;
+  if (innings) {
+    const r = firstNRuns(game, innings);
+    if (!r) return { status: 'pending', reason: `f5_innings_incomplete` };
+    awayRuns = r.away; homeRuns = r.home;
+  } else {
+    awayRuns = game.linescore?.teams?.away?.runs;
+    homeRuns = game.linescore?.teams?.home?.runs;
+  }
   if (awayRuns == null || homeRuns == null) return { status: 'pending', reason: 'no_score' };
 
-  const pickedTeam = pick.pick_text.replace(/\s+ML\b.*$/i, '').trim();
-  const pn = norm(pickedTeam);
-  const an = norm(game.teams.away.team.name);
-  const hn = norm(game.teams.home.team.name);
-
-  let side = null;
-  if (an.includes(pn) || pn.includes(an.split(' ').pop())) side = 'away';
-  else if (hn.includes(pn) || pn.includes(hn.split(' ').pop())) side = 'home';
+  const pickedTeam = pick.pick_text.replace(/\s+(F5\s+)?ML\b.*$/i, '').replace(/\s+F5\b.*$/i, '').trim();
+  const side = teamSide(pickedTeam, game.teams.away.team.name, game.teams.home.team.name);
   if (!side) return { status: 'error', reason: `could_not_match_team: ${pickedTeam}` };
 
   const pickedRuns = side === 'away' ? awayRuns : homeRuns;
   const oppRuns = side === 'away' ? homeRuns : awayRuns;
-  const detail = gameScoreDetail(game);
+  const tag = innings ? `F5 ` : '';
+  const detail = `${tag}${gameScoreDetail(game)}` + (innings ? ` [F5: ${awayRuns}-${homeRuns}]` : '');
 
   if (pickedRuns > oppRuns) return { result: 'W', final_detail: detail };
   if (pickedRuns < oppRuns) return { result: 'L', final_detail: detail };
   return { result: 'P', final_detail: detail + ' (tied)' };
 }
 
-function gradeTotal(pick, game) {
+function gradeTotal(pick, game, innings = null) {
   if (!isGameFinal(game)) return { status: 'pending', reason: 'not_final' };
-  const aw = game.linescore?.teams?.away?.runs;
-  const hr = game.linescore?.teams?.home?.runs;
+  let aw, hr;
+  if (innings) {
+    const r = firstNRuns(game, innings);
+    if (!r) return { status: 'pending', reason: `f5_innings_incomplete` };
+    aw = r.away; hr = r.home;
+  } else {
+    aw = game.linescore?.teams?.away?.runs;
+    hr = game.linescore?.teams?.home?.runs;
+  }
   if (aw == null || hr == null) return { status: 'pending', reason: 'no_score' };
   const total = aw + hr;
 
@@ -191,7 +249,8 @@ function gradeTotal(pick, game) {
   const isOver  = pt.match(/\bover\b/) || verdict.includes('OVER');
   const isUnder = pt.match(/\bunder\b/) || verdict.includes('UNDER');
 
-  const detail = `Total runs: ${total} (line ${line}) — ${gameScoreDetail(game)}`;
+  const tag = innings ? 'F5 total runs' : 'Total runs';
+  const detail = `${tag}: ${total} (line ${line}) — ${gameScoreDetail(game)}`;
   if (total === line) return { result: 'P', final_detail: detail };
   if (isOver)  return { result: total > line ? 'W' : 'L', final_detail: detail };
   if (isUnder) return { result: total < line ? 'W' : 'L', final_detail: detail };
@@ -220,6 +279,9 @@ async function gradePlayerProp(pick, game) {
   } else if (propType.includes('home run')) {
     actual = stats.batting?.homeRuns ?? 0;
     statSource = 'batting.homeRuns';
+  } else if (propType.includes('rbi') || propType.includes('run batted')) {
+    actual = stats.batting?.rbi ?? 0;
+    statSource = 'batting.rbi';
   } else if (propType.includes('strikeout') || propType === 'strikeouts') {
     // Pitcher prop if they pitched, else batter strikeouts
     if (stats.pitching && stats.pitching.inningsPitched && stats.pitching.inningsPitched !== '0.0') {
@@ -260,10 +322,14 @@ async function gradePick(pick) {
   }
 
   let result;
-  if (pick.market === 'moneyline')       result = gradeMoneyline(pick, game);
-  else if (pick.market === 'total')      result = gradeTotal(pick, game);
-  else if (pick.market === 'player_prop') result = await gradePlayerProp(pick, game);
-  else if (pick.market === 'spread')     result = { status: 'unsupported', reason: 'spread_not_implemented_yet' };
+  const mkt = (pick.market || '').toLowerCase();
+  const f5 = isF5(pick);
+  if (mkt === 'f5_total' || (f5 && mkt === 'total'))          result = gradeTotal(pick, game, 5);
+  else if (mkt === 'f5_moneyline' || (f5 && mkt === 'moneyline')) result = gradeMoneyline(pick, game, 5);
+  else if (mkt === 'moneyline')          result = gradeMoneyline(pick, game);
+  else if (mkt === 'total')              result = gradeTotal(pick, game);
+  else if (mkt === 'player_prop')        result = await gradePlayerProp(pick, game);
+  else if (mkt === 'spread')             result = { status: 'unsupported', reason: 'spread_not_implemented_yet' };
   else result = { status: 'unsupported', reason: `unknown_market: ${pick.market}` };
 
   if (result.result) {
