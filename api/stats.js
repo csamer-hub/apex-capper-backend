@@ -9,6 +9,17 @@ export default async function handler(req, res) {
 
   const { sport, type, player, team, season, limit = "10", group = "hitting", week } = req.query;
 
+  // ── Dynamic current-season defaults (replaces stale hardcoded years so a
+  //    call that omits &season= pulls THIS season, not last year's) ──
+  const _now = new Date();
+  const _y = _now.getUTCFullYear(), _m = _now.getUTCMonth() + 1; // month 1-12
+  const CUR = {
+    mlb: String(_y),                                   // MLB season = calendar year
+    nfl: String(_m >= 3 ? _y : _y - 1),                // NFL season-year (Jan–Feb = prior year)
+    nba: String(_m >= 10 ? _y + 1 : _y),               // NBA API END-year (e.g. 2027 = 2026-27)
+    nhl: (_m >= 9 ? `${_y}${_y + 1}` : `${_y - 1}${_y}`), // NHL start+end (e.g. 20262027)
+  };
+
   if (!sport) return res.status(400).json({
     error: "sport param required",
     validSports: ["nhl", "nba", "mlb", "nfl"],
@@ -24,7 +35,7 @@ export default async function handler(req, res) {
   // NHL — api-web.nhle.com + api.nhle.com/stats/rest
   // ══════════════════════════════════════════════════════════════════════════
   if (sport === "nhl") {
-    const NHL_SEASON = season || "20242025";
+    const NHL_SEASON = season || CUR.nhl;
     try {
       if (type === "raw") {
         const path = req.query.path || `seasons?seasonId=${NHL_SEASON}`;
@@ -121,7 +132,7 @@ export default async function handler(req, res) {
   // NBA — api.server.nbaapi.com + stats.nba.com
   // ══════════════════════════════════════════════════════════════════════════
   if (sport === "nba") {
-    const NBA_SEASON = season || "2025";
+    const NBA_SEASON = season || CUR.nba;
     const NBA_HEADERS = {
       "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
       "Referer":"https://www.nba.com/","Origin":"https://www.nba.com","Accept":"application/json",
@@ -210,7 +221,7 @@ export default async function handler(req, res) {
   // MLB — statsapi.mlb.com
   // ══════════════════════════════════════════════════════════════════════════
   if (sport === "mlb") {
-    const MLB_SEASON = season || "2025";
+    const MLB_SEASON = season || CUR.mlb;
     const BASE = "https://statsapi.mlb.com/api/v1";
     try {
       if (type === "search" && player) {
@@ -319,7 +330,7 @@ export default async function handler(req, res) {
   // NFL — ESPN API
   // ══════════════════════════════════════════════════════════════════════════
   if (sport === "nfl") {
-    const NFL_SEASON = season || "2025";
+    const NFL_SEASON = season || CUR.nfl;
     const SITE = "https://site.api.espn.com/apis/site/v2/sports/football/nfl";
     const CORE = "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl";
     try {
