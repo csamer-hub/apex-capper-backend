@@ -1,13 +1,15 @@
 // ═══════════════════════════════════════════════════════════════
-// APEX MLB PICK GRADER
+// APEX PICK GRADER (MLB + NFL)
 // ═══════════════════════════════════════════════════════════════
 // Vercel serverless function — runs via cron OR manual trigger.
 //
-// Pulls pending MLB picks from Supabase, finds the game on MLB Stats API,
-// computes W/L/Push, writes result back via service_role key.
+// Pulls pending MLB + NFL picks from Supabase, finds the game (MLB Stats API
+// for baseball, ESPN scoreboard for football), computes W/L/Push, writes the
+// result back via service_role key.
 //
-// Supports: moneyline, total (O/U), player_prop (hits/total bases/HR/K)
-// Skips:    spread (MLB run line) — added later
+// MLB: moneyline, total (O/U), F5 moneyline/total, player_prop (hits/TB/HR/RBI/K)
+// NFL: moneyline, spread (with push), total, and 1st-half h1_moneyline/h1_spread/h1_total
+// Skips: MLB run line; NFL player props (added later)
 //
 // Environment variables required (set in Vercel project settings):
 //   SUPABASE_URL                — https://fmaxypsjsnknpbxplmuf.supabase.co
@@ -309,6 +311,105 @@ async function gradePlayerProp(pick, game) {
   return { status: 'error', reason: `no_direction in verdict: ${v}` };
 }
 
+// ═══════════════════════════════════════════════════════════
+// NFL GRADING — ESPN box score (final + per-quarter), moneyline,
+// spread (with push), total, and 1st-half (h1_*) markets.
+// ═══════════════════════════════════════════════════════════
+async function espnJson(url) {
+  const r = await fetch(url, { headers: { 'User-Agent': 'ApexGrader/1.0', 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error(`ESPN ${r.status}`);
+  return r.json();
+}
+function espnDateStr(d) { return `${d.getUTCFullYear()}${String(d.getUTCMonth()+1).padStart(2,'0')}${String(d.getUTCDate()).padStart(2,'0')}`; }
+async function findNflGame(dateForLookup, away, home) {
+  const base = new Date(dateForLookup);
+  const wantA = norm(away), wantH = norm(home);
+  if (!wantA || !wantH) return null;
+  for (const off of [0, -1, 1, -2]) {
+    const d = new Date(base.getTime() + off * 86400000);
+    let sb;
+    try { sb = await espnJson(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${espnDateStr(d)}`); }
+    catch (e) { continue; }
+    const ev = (sb.events || []).find(e => {
+      const comp = e.competitions?.[0];
+      const names = (comp?.competitors || []).map(c => norm(c.team?.displayName) + ' ' + norm(c.team?.shortDisplayName)).join(' ');
+      return [wantA, wantH].every(w => names.includes(w));
+    });
+    if (ev) return ev;
+  }
+  return null;
+}
+function nflScore(ev) {
+  const comp = ev.competitions?.[0]; const cs = comp?.competitors || [];
+  const H = cs.find(c => c.homeAway === 'home'), A = cs.find(c => c.homeAway === 'away');
+  if (!H || !A) return null;
+  const q = c => (c.linescores || []).map(x => parseFloat(x.value) || 0);
+  return {
+    completed: ev.status?.type?.completed === true,
+    homeName: H.team?.displayName, awayName: A.team?.displayName,
+    home: parseFloat(H.score), away: parseFloat(A.score), homeQ: q(H), awayQ: q(A)
+  };
+}
+function nflHalf(s, n) { let a = 0, h = 0; for (let i = 0; i < n; i++) { a += s.awayQ[i] || 0; h += s.homeQ[i] || 0; } return { away: a, home: h }; }
+function gradeNflMoneyline(pick, s, half) {
+  let a = s.away, h = s.home; if (half) { const r = nflHalf(s, 2); a = r.away; h = r.home; }
+  const side = teamSide(pick.pick_text.replace(/\b(1H|H1|first half)\b/ig, '').replace(/\s+ML\b.*$/i, '').trim(), s.awayName, s.homeName);
+  if (!side) return { status: 'error', reason: `could_not_match_team: ${pick.pick_text}` };
+  const my = side === 'away' ? a : h, opp = side === 'away' ? h : a;
+  const detail = `${half ? '1H ' : ''}${s.awayName} ${s.away} - ${s.homeName} ${s.home}${half ? ` [1H ${a}-${h}]` : ''}`;
+  if (my > opp) return { result: 'W', final_detail: detail };
+  if (my < opp) return { result: 'L', final_detail: detail };
+  return { result: 'P', final_detail: detail + ' (tie)' };
+}
+function gradeNflSpread(pick, s, half) {
+  let a = s.away, h = s.home; if (half) { const r = nflHalf(s, 2); a = r.away; h = r.home; }
+  const line = parseFloat(pick.line); if (isNaN(line)) return { status: 'error', reason: 'no_line' };
+  const cleaned = pick.pick_text.replace(/[-+]?\d+(\.\d+)?/g, '').replace(/\b(1H|H1|first half|spread|ats|cover)\b/ig, '').trim();
+  const side = teamSide(cleaned, s.awayName, s.homeName);
+  if (!side) return { status: 'error', reason: `could_not_match_team: ${pick.pick_text}` };
+  const margin = side === 'home' ? h - a : a - h;   // picked team's margin
+  const diff = margin + line;                        // line is the picked side's spread (e.g. -7.5)
+  const detail = `${half ? '1H ' : ''}${s.awayName} ${s.away} - ${s.homeName} ${s.home} · ${pick.pick_text} (margin ${margin >= 0 ? '+' : ''}${margin}, line ${line})`;
+  if (Math.abs(diff) < 1e-9) return { result: 'P', final_detail: detail + ' (push)' };
+  return { result: diff > 0 ? 'W' : 'L', final_detail: detail };
+}
+function gradeNflTotal(pick, s, half) {
+  let a = s.away, h = s.home; if (half) { const r = nflHalf(s, 2); a = r.away; h = r.home; }
+  const total = a + h; const line = parseFloat(pick.line); if (isNaN(line)) return { status: 'error', reason: 'no_line' };
+  const t = (pick.pick_text || '').toLowerCase(), v = (pick.verdict || '').toLowerCase();
+  const isOver = /\bover\b/.test(t) || v.includes('over'), isUnder = /\bunder\b/.test(t) || v.includes('under');
+  const detail = `${half ? '1H total' : 'Total'}: ${total} (line ${line}) — ${s.awayName} ${s.away}, ${s.homeName} ${s.home}`;
+  if (total === line) return { result: 'P', final_detail: detail };
+  if (isOver) return { result: total > line ? 'W' : 'L', final_detail: detail };
+  if (isUnder) return { result: total < line ? 'W' : 'L', final_detail: detail };
+  return { status: 'error', reason: 'no_direction_in_pick' };
+}
+async function gradeNflPick(pick) {
+  const { away, home } = parseMatchup(pick.matchup);
+  const ev = await findNflGame(pick.game_start_at || pick.created_at, away, home);
+  if (!ev) return { status: 'no_game_found', pick_id: pick.id, pick_text: pick.pick_text };
+  const s = nflScore(ev);
+  if (!s || !s.completed) return { status: 'game_not_final', pick_id: pick.id };
+  const mkt = (pick.market || '').toLowerCase();
+  let result;
+  if (mkt === 'h1_total')          result = gradeNflTotal(pick, s, true);
+  else if (mkt === 'h1_spread')    result = gradeNflSpread(pick, s, true);
+  else if (mkt === 'h1_moneyline') result = gradeNflMoneyline(pick, s, true);
+  else if (mkt === 'total')        result = gradeNflTotal(pick, s, false);
+  else if (mkt === 'spread')       result = gradeNflSpread(pick, s, false);
+  else if (mkt === 'moneyline')    result = gradeNflMoneyline(pick, s, false);
+  else if (mkt === 'prop' || mkt === 'player_prop') result = { status: 'unsupported', reason: 'nfl_prop_grading_not_implemented' };
+  else result = { status: 'unsupported', reason: `unknown_market: ${pick.market}` };
+  if (result.result) {
+    await supaFetch(`/picks?id=eq.${pick.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ result: result.result, final_detail: result.final_detail, graded_at: new Date().toISOString() })
+    });
+    return { status: 'graded', pick_id: pick.id, result: result.result, detail: result.final_detail };
+  }
+  return { status: result.status || 'error', pick_id: pick.id, reason: result.reason };
+}
+
 // ── PIPELINE ───────────────────────────────────────────────
 
 async function gradePick(pick) {
@@ -366,14 +467,14 @@ export default async function handler(req, res) {
   const limit  = parseInt(req.query?.limit) || 50;
 
   try {
-    // Pull pending MLB picks older than 4 hours (game safely over)
+    // Pull pending MLB + NFL picks older than 4 hours (game safely over)
     const cutoff = new Date(Date.now() - 4 * 3600 * 1000).toISOString();
     const picks = await supaFetch(
-      `/picks?select=*&sport=eq.MLB&result=is.null&created_at=lt.${cutoff}&order=created_at.asc&limit=${limit}`
+      `/picks?select=*&sport=in.(MLB,NFL)&result=is.null&created_at=lt.${cutoff}&order=created_at.asc&limit=${limit}`
     );
 
     if (!picks?.length) {
-      return res.status(200).json({ message: 'No pending MLB picks to grade', graded: 0 });
+      return res.status(200).json({ message: 'No pending picks to grade', graded: 0 });
     }
 
     const summary = {
@@ -392,7 +493,7 @@ export default async function handler(req, res) {
           summary.details.push({ id: pick.id, pick: pick.pick_text, market: pick.market, would_grade: true });
           continue;
         }
-        const r = await gradePick(pick);
+        const r = (pick.sport === 'NFL') ? await gradeNflPick(pick) : await gradePick(pick);
         summary.details.push(r);
         if (r.status === 'graded') {
           summary.graded++;
